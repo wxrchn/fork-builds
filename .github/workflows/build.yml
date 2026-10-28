@@ -29,7 +29,6 @@ jobs:
           - { repo: memos, branch: main, file: scripts/Dockerfile, image: memos }
           - { repo: rustdesk-server, branch: forapi, file: docker/Dockerfile, context: docker, image: rustdesk-server-s6 }
           - { repo: sshwifty, branch: master, file: Dockerfile, image: sshwifty }
-          - { repo: sun-panel, branch: master, file: Dockerfile, image: sun-panel }
           - { repo: watchtower, branch: main, file: dockerfiles/Dockerfile.self-contained, image: watchtower }
           - { repo: wud, branch: main, file: Dockerfile, image: wud }
     name: ${{ matrix.image }}
@@ -63,27 +62,6 @@ jobs:
           fi
           { echo "TAGS<<EOF"; echo "$TAGS"; echo "EOF"; } >> "$GITHUB_ENV"
           echo "Tags:"; echo "$TAGS"
-
-      - name: Approve pnpm build scripts (sun-panel)
-        if: ${{ matrix.repo == 'sun-panel' }}
-        run: |
-          python3 - <<'PYEOF'
-          import pathlib
-          # pnpm v11+ replaced onlyBuiltDependencies with the allowBuilds
-          # map (the old key is ignored, which is why run #3 still failed
-          # even with the file present): create pnpm-workspace.yaml with the
-          # new key, and patch the Dockerfile copy to bring it into /build
-          # before `pnpm install` runs. Only the build workspace is changed.
-          pathlib.Path("pnpm-workspace.yaml").write_text(
-              "allowBuilds:\n  esbuild: true\n  vue-demi: true\n")
-          d = pathlib.Path("Dockerfile")
-          t = d.read_text()
-          anchor = "COPY ./pnpm-lock.yaml /build"
-          assert anchor in t, "Dockerfile anchor not found"
-          t = t.replace(anchor, anchor + "\n\nCOPY ./pnpm-workspace.yaml /build", 1)
-          d.write_text(t)
-          print("created pnpm-workspace.yaml; Dockerfile patched")
-          PYEOF
 
       - name: Make s6-overlay arch-aware (rustdesk-server)
         if: matrix.repo == 'rustdesk-server'
@@ -164,6 +142,33 @@ jobs:
           VER=$(curl -fsSL "https://hub.docker.com/v2/repositories/jc21/nginx-proxy-manager/tags?page_size=100&ordering=last_updated" | jq -r '[.results[].name | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))] | first // empty')
           if [ -n "$VER" ]; then
             docker buildx imagetools create -t "ghcr.io/wxrchn/nginx-proxy-manager:$VER" "jc21/nginx-proxy-manager:$VER"
+            echo "Mirrored latest and $VER"
+          else
+            echo "Mirrored latest only (no version tag resolved)"
+          fi
+
+  # sun-panel is not built from source either (wxr's call, 2026-10-28:
+  # take upstream's published package instead of building); mirror the
+  # official Docker Hub image to GHCR, like nginx-proxy-manager.
+  mirror-sun-panel:
+    runs-on: ubuntu-latest
+    name: sun-panel (mirror)
+    steps:
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Mirror hslr/sun-panel to GHCR
+        run: |
+          set -e
+          docker buildx imagetools create -t ghcr.io/wxrchn/sun-panel:latest hslr/sun-panel:latest
+          VER=$(curl -fsSL "https://hub.docker.com/v2/repositories/hslr/sun-panel/tags?page_size=100" | jq -r '[.results[].name | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))] | sort_by(split(".") | map(tonumber)) | last // empty')
+          if [ -n "$VER" ]; then
+            docker buildx imagetools create -t "ghcr.io/wxrchn/sun-panel:$VER" "hslr/sun-panel:$VER"
             echo "Mirrored latest and $VER"
           else
             echo "Mirrored latest only (no version tag resolved)"
