@@ -41,6 +41,32 @@ jobs:
         id: src
         run: echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
+      - name: Resolve image version
+        run: |
+          if [ -f scripts/release_version.sh ]; then
+            echo "IMAGE_VERSION=$(bash scripts/release_version.sh development-version)" >> "$GITHUB_ENV"
+          else
+            echo "IMAGE_VERSION=dev" >> "$GITHUB_ENV"
+          fi
+
+      - name: Approve pnpm build scripts (sun-panel)
+        if: ${{ matrix.repo == 'sun-panel' }}
+        run: |
+          python3 - <<'PYEOF'
+          import json, glob
+          for p in glob.glob("**/package.json", recursive=True):
+              if "node_modules" in p:
+                  continue
+              d = json.load(open(p))
+              pnpm = d.setdefault("pnpm", {})
+              deps = pnpm.setdefault("onlyBuiltDependencies", [])
+              for x in ("esbuild", "vue-demi"):
+                  if x not in deps:
+                      deps.append(x)
+              json.dump(d, open(p, "w"), indent=2, ensure_ascii=False)
+              print("patched", p)
+          PYEOF
+
       - name: Pre-build step
         if: ${{ matrix.pre != '' }}
         run: ${{ matrix.pre }}
@@ -61,6 +87,9 @@ jobs:
           file: ./${{ matrix.file }}
           platforms: linux/amd64,linux/arm64
           push: true
+          build-args: |
+            VERSION=${{ env.IMAGE_VERSION }}
+            COMMIT=${{ steps.src.outputs.sha }}
           tags: |
             ghcr.io/wxrchn/${{ matrix.image }}:latest
             ghcr.io/wxrchn/${{ matrix.image }}:sha-${{ steps.src.outputs.sha }}
