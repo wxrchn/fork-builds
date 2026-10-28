@@ -27,7 +27,7 @@ jobs:
           - { repo: frp, branch: dev, file: dockerfiles/Dockerfile-for-frpc, image: frpc }
           - { repo: frp, branch: dev, file: dockerfiles/Dockerfile-for-frps, image: frps }
           - { repo: memos, branch: main, file: scripts/Dockerfile, image: memos }
-          - { repo: rustdesk-server, branch: forapi, file: docker/Dockerfile, image: rustdesk-server-s6 }
+          - { repo: rustdesk-server, branch: forapi, file: docker/Dockerfile, context: docker, image: rustdesk-server-s6 }
           - { repo: sshwifty, branch: master, file: Dockerfile, image: sshwifty }
           - { repo: sun-panel, branch: master, file: Dockerfile, image: sun-panel }
           - { repo: watchtower, branch: main, file: dockerfiles/Dockerfile.self-contained, image: watchtower }
@@ -69,12 +69,13 @@ jobs:
         run: |
           python3 - <<'PYEOF'
           import pathlib
-          # pnpm v10 reads build approvals from pnpm-workspace.yaml (the
-          # package.json "pnpm" field is ignored) and this repo has none:
-          # create it, and patch the Dockerfile copy to bring it into /build
+          # pnpm v11+ replaced onlyBuiltDependencies with the allowBuilds
+          # map (the old key is ignored, which is why run #3 still failed
+          # even with the file present): create pnpm-workspace.yaml with the
+          # new key, and patch the Dockerfile copy to bring it into /build
           # before `pnpm install` runs. Only the build workspace is changed.
           pathlib.Path("pnpm-workspace.yaml").write_text(
-              "onlyBuiltDependencies:\n  - esbuild\n  - vue-demi\n")
+              "allowBuilds:\n  esbuild: true\n  vue-demi: true\n")
           d = pathlib.Path("Dockerfile")
           t = d.read_text()
           anchor = "COPY ./pnpm-lock.yaml /build"
@@ -133,7 +134,7 @@ jobs:
 
       - uses: docker/build-push-action@v6
         with:
-          context: .
+          context: ${{ matrix.context || '.' }}
           file: ./${{ matrix.file }}
           platforms: ${{ matrix.platforms || 'linux/amd64,linux/arm64' }}
           push: true
