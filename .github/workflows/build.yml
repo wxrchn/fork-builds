@@ -27,6 +27,8 @@ jobs:
           - { repo: frp, branch: dev, file: dockerfiles/Dockerfile-for-frpc, image: frpc }
           - { repo: frp, branch: dev, file: dockerfiles/Dockerfile-for-frps, image: frps }
           - { repo: memos, branch: main, file: scripts/Dockerfile, image: memos }
+          - { repo: rustdesk-server, branch: forapi, file: docker/Dockerfile, image: rustdesk-server-s6, platforms: "linux/amd64" }
+          - { repo: sshwifty, branch: master, file: Dockerfile, image: sshwifty }
           - { repo: sun-panel, branch: master, file: Dockerfile, image: sun-panel }
           - { repo: watchtower, branch: main, file: dockerfiles/Dockerfile.self-contained, image: watchtower }
           - { repo: wud, branch: main, file: Dockerfile, image: wud }
@@ -98,7 +100,7 @@ jobs:
         with:
           context: .
           file: ./${{ matrix.file }}
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ matrix.platforms || 'linux/amd64,linux/arm64' }}
           push: true
           build-args: |
             VERSION=${{ env.IMAGE_VERSION }}
