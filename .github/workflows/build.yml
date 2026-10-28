@@ -68,18 +68,20 @@ jobs:
         if: ${{ matrix.repo == 'sun-panel' }}
         run: |
           python3 - <<'PYEOF'
-          import json, glob
-          for p in glob.glob("**/package.json", recursive=True):
-              if "node_modules" in p:
-                  continue
-              d = json.load(open(p))
-              pnpm = d.setdefault("pnpm", {})
-              deps = pnpm.setdefault("onlyBuiltDependencies", [])
-              for x in ("esbuild", "vue-demi"):
-                  if x not in deps:
-                      deps.append(x)
-              json.dump(d, open(p, "w"), indent=2, ensure_ascii=False)
-              print("patched", p)
+          import pathlib
+          # pnpm v10 reads build approvals from pnpm-workspace.yaml (the
+          # package.json "pnpm" field is ignored) and this repo has none:
+          # create it, and patch the Dockerfile copy to bring it into /build
+          # before `pnpm install` runs. Only the build workspace is changed.
+          pathlib.Path("pnpm-workspace.yaml").write_text(
+              "onlyBuiltDependencies:\n  - esbuild\n  - vue-demi\n")
+          d = pathlib.Path("Dockerfile")
+          t = d.read_text()
+          anchor = "COPY ./pnpm-lock.yaml /build"
+          assert anchor in t, "Dockerfile anchor not found"
+          t = t.replace(anchor, anchor + "\n\nCOPY ./pnpm-workspace.yaml /build", 1)
+          d.write_text(t)
+          print("created pnpm-workspace.yaml; Dockerfile patched")
           PYEOF
 
       - name: Make s6-overlay arch-aware (rustdesk-server)
