@@ -165,10 +165,20 @@ jobs:
       - name: Mirror hslr/sun-panel to GHCR
         run: |
           set -e
-          docker buildx imagetools create -t ghcr.io/wxrchn/sun-panel:latest hslr/sun-panel:latest
+          # GHCR rejects the attestation manifests bundled in the upstream
+          # OCI index (403 on the unknown-architecture entries), so copy
+          # only the real platform manifests into a fresh index.
+          copy_tag() {
+            local src="hslr/sun-panel:$1" dst="ghcr.io/wxrchn/sun-panel:$1"
+            local digests args=""
+            digests=$(docker buildx imagetools inspect "$src" --raw | jq -r '[.manifests[] | select(.platform.architecture != "unknown") | .digest] | unique | .[]')
+            for d in $digests; do args="$args docker.io/hslr/sun-panel@$d"; done
+            docker buildx imagetools create -t "$dst" $args
+          }
+          copy_tag latest
           VER=$(curl -fsSL "https://hub.docker.com/v2/repositories/hslr/sun-panel/tags?page_size=100" | jq -r '[.results[].name | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))] | sort_by(split(".") | map(tonumber)) | last // empty')
           if [ -n "$VER" ]; then
-            docker buildx imagetools create -t "ghcr.io/wxrchn/sun-panel:$VER" "hslr/sun-panel:$VER"
+            copy_tag "$VER"
             echo "Mirrored latest and $VER"
           else
             echo "Mirrored latest only (no version tag resolved)"
