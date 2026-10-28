@@ -27,7 +27,7 @@ jobs:
           - { repo: frp, branch: dev, file: dockerfiles/Dockerfile-for-frpc, image: frpc }
           - { repo: frp, branch: dev, file: dockerfiles/Dockerfile-for-frps, image: frps }
           - { repo: memos, branch: main, file: scripts/Dockerfile, image: memos }
-          - { repo: rustdesk-server, branch: forapi, file: docker/Dockerfile, image: rustdesk-server-s6, platforms: "linux/amd64" }
+          - { repo: rustdesk-server, branch: forapi, file: docker/Dockerfile, image: rustdesk-server-s6 }
           - { repo: sshwifty, branch: master, file: Dockerfile, image: sshwifty }
           - { repo: sun-panel, branch: master, file: Dockerfile, image: sun-panel }
           - { repo: watchtower, branch: main, file: dockerfiles/Dockerfile.self-contained, image: watchtower }
@@ -80,6 +80,39 @@ jobs:
                       deps.append(x)
               json.dump(d, open(p, "w"), indent=2, ensure_ascii=False)
               print("patched", p)
+          PYEOF
+
+      - name: Make s6-overlay arch-aware (rustdesk-server)
+        if: matrix.repo == 'rustdesk-server'
+        run: |
+          python3 - <<'PYEOF'
+          import pathlib
+          p = pathlib.Path('docker/Dockerfile')
+          t = p.read_text()
+          stage = (
+              'FROM alpine:3 AS s6dl\n'
+              'ARG TARGETARCH\n'
+              'ARG S6_OVERLAY_VERSION=3.2.0.0\n'
+              'RUN case "$TARGETARCH" in amd64) A=x86_64 ;; arm64) A=aarch64 ;; arm) A=armhf ;; *) A=x86_64 ;; esac && \\\n'
+              '    wget -q "https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-noarch.tar.xz" -O /tmp/s6-overlay-noarch.tar.xz && \\\n'
+              '    wget -q "https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-${A}.tar.xz" -O /tmp/s6-overlay-arch.tar.xz\n'
+              '\n'
+          )
+          lines = []
+          for ln in t.splitlines():
+              if ln.strip() == 'ARG S6_ARCH=x86_64':
+                  continue
+              if ln.startswith('ADD ') and 's6-overlay-noarch.tar.xz' in ln:
+                  ln = 'COPY --from=s6dl /tmp/s6-overlay-noarch.tar.xz /tmp/s6-overlay-noarch.tar.xz'
+              elif ln.startswith('ADD ') and '${S6_ARCH}' in ln:
+                  ln = 'COPY --from=s6dl /tmp/s6-overlay-arch.tar.xz /tmp/s6-overlay-arch.tar.xz'
+              elif '${S6_ARCH}' in ln:
+                  ln = ln.replace('s6-overlay-${S6_ARCH}.tar.xz', 's6-overlay-arch.tar.xz')
+              lines.append(ln)
+          out = stage + '\n'.join(lines) + '\n'
+          assert 's6dl' in out and 'S6_ARCH=x86_64' not in out and '${S6_ARCH}' not in out, 'patch failed'
+          p.write_text(out)
+          print('patched docker/Dockerfile for per-arch s6-overlay')
           PYEOF
 
       - name: Pre-build step
