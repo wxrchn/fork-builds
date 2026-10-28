@@ -49,6 +49,19 @@ jobs:
             echo "IMAGE_VERSION=dev" >> "$GITHUB_ENV"
           fi
 
+      - name: Compose image tags
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAGS="ghcr.io/wxrchn/${{ matrix.image }}:latest"
+          VER=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/wxrchn/${{ matrix.repo }}/releases/latest" | jq -r '.tag_name // empty' || true)
+          if [ -n "$VER" ] && [ "$VER" != "null" ]; then
+            TAGS="$TAGS
+          ghcr.io/wxrchn/${{ matrix.image }}:$VER"
+          fi
+          { echo "TAGS<<EOF"; echo "$TAGS"; echo "EOF"; } >> "$GITHUB_ENV"
+          echo "Tags:"; echo "$TAGS"
+
       - name: Approve pnpm build scripts (sun-panel)
         if: ${{ matrix.repo == 'sun-panel' }}
         run: |
@@ -90,9 +103,7 @@ jobs:
           build-args: |
             VERSION=${{ env.IMAGE_VERSION }}
             COMMIT=${{ steps.src.outputs.sha }}
-          tags: |
-            ghcr.io/wxrchn/${{ matrix.image }}:latest
-            ghcr.io/wxrchn/${{ matrix.image }}:sha-${{ steps.src.outputs.sha }}
+          tags: ${{ env.TAGS }}
 
   # nginx-proxy-manager is not built from source (its image needs a frontend
   # pre-build); mirror the official Docker Hub image to GHCR instead.
