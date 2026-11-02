@@ -31,7 +31,12 @@ jobs:
         include:
           - { repo: 3x-ui, branch: main, file: Dockerfile, image: 3x-ui }
           - { repo: LunaTV, branch: main, file: Dockerfile, image: lunatv }
-          - { repo: dockge, branch: master, file: docker/Dockerfile, image: dockge }
+          # dockge: its Dockerfile never builds the frontend - upstream compiles
+          # frontend-dist on the host before docker build, so `pre` does the same
+          # (found 2026-11-02: images built without it had no web UI at all).
+          # target release matches the version tags (default would be nightly);
+          # variant is a per-image stamp so changing this entry rebuilds only dockge.
+          - { repo: dockge, branch: master, file: docker/Dockerfile, image: dockge, target: release, variant: fe-release-1, pre: "npm clean-install --no-fund && npm run build:frontend" }
           - { repo: filebrowser, branch: main, file: _docker/Dockerfile, image: filebrowser }
           - { repo: frp, branch: dev, file: dockerfiles/Dockerfile-for-frpc, image: frpc }
           - { repo: frp, branch: dev, file: dockerfiles/Dockerfile-for-frps, image: frps }
@@ -74,9 +79,10 @@ jobs:
               LABELS=$(curl -fsSL -H "Authorization: Bearer $TOKEN" "$REG/blobs/$CFG" | jq -c '.config.Labels // {}' || true)
               REV=$(printf '%s' "$LABELS" | jq -r '."org.opencontainers.image.revision" // empty')
               REC=$(printf '%s' "$LABELS" | jq -r '."io.wxrchn.build-recipe" // empty')
-              echo "Existing ghcr.io/wxrchn/${{ matrix.image }}:latest stamp: revision=$REV recipe=$REC"
-              echo "Current source: ${{ steps.src.outputs.full }} recipe=$BUILD_RECIPE"
-              if [ "$REV" = "${{ steps.src.outputs.full }}" ] && [ "$REC" = "$BUILD_RECIPE" ]; then
+              VAR=$(printf '%s' "$LABELS" | jq -r '."io.wxrchn.build-variant" // empty')
+              echo "Existing ghcr.io/wxrchn/${{ matrix.image }}:latest stamp: revision=$REV recipe=$REC variant=$VAR"
+              echo "Current source: ${{ steps.src.outputs.full }} recipe=$BUILD_RECIPE variant=${{ matrix.variant }}"
+              if [ "$REV" = "${{ steps.src.outputs.full }}" ] && [ "$REC" = "$BUILD_RECIPE" ] && [ "$VAR" = "${{ matrix.variant }}" ]; then
                 skip=true
               fi
             fi
@@ -140,6 +146,12 @@ jobs:
           print('patched docker/Dockerfile for per-arch s6-overlay')
           PYEOF
 
+      - name: Set up Node.js for pre-build
+        if: ${{ matrix.pre != '' && steps.check.outputs.skip != 'true' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
       - name: Pre-build step
         if: ${{ matrix.pre != '' && steps.check.outputs.skip != 'true' }}
         run: ${{ matrix.pre }}
@@ -162,6 +174,7 @@ jobs:
         with:
           context: ${{ matrix.context || '.' }}
           file: ./${{ matrix.file }}
+          target: ${{ matrix.target }}
           platforms: ${{ matrix.platforms || 'linux/amd64,linux/arm64' }}
           push: true
           build-args: |
@@ -171,6 +184,7 @@ jobs:
           labels: |
             org.opencontainers.image.revision=${{ steps.src.outputs.full }}
             io.wxrchn.build-recipe=${{ env.BUILD_RECIPE }}
+            io.wxrchn.build-variant=${{ matrix.variant }}
 
   # nginx-proxy-manager is not built from source (its image needs a frontend
   # pre-build); mirror the official Docker Hub image to GHCR instead.
