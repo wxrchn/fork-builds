@@ -3,6 +3,8 @@ name: Build fork images
 # Builds container images from wxrchn's forks (default branches) and pushes
 # them to GHCR under ghcr.io/wxrchn/*. Runs weekly on Mondays 02:00 UTC
 # (10:00 Asia/Shanghai), after the weekly fork sync, or manually.
+# Skip rule (wxr, 2026-11-02): an image whose source has not changed since
+# the last build/mirror is skipped - no new commits, no rebuild.
 
 on:
   workflow_dispatch:
@@ -12,6 +14,13 @@ on:
 permissions:
   contents: read
   packages: write
+
+# Stamped on every built image together with the source commit SHA. The
+# build job skips a fork whose current HEAD still matches the stamp on its
+# existing image. Bump BUILD_RECIPE whenever the build logic in this file
+# changes in a way that alters the output image.
+env:
+  BUILD_RECIPE: "1"
 
 jobs:
   build:
@@ -38,11 +47,45 @@ jobs:
           repository: wxrchn/${{ matrix.repo }}
           ref: ${{ matrix.branch }}
 
-      - name: Source short SHA
+      - name: Source SHA
         id: src
-        run: echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          echo "full=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Skip if already built from this source
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          skip=false
+          REG="https://ghcr.io/v2/wxrchn/${{ matrix.image }}"
+          TOKEN=$(curl -fsSL -u "${{ github.actor }}:$GH_TOKEN" "https://ghcr.io/token?service=ghcr.io&scope=repository:wxrchn/${{ matrix.image }}:pull" | jq -r '.token // empty' || true)
+          if [ -n "$TOKEN" ]; then
+            MANIFEST=$(curl -fsSL -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.oci.image.index.v1+json" "$REG/manifests/latest" || true)
+            CFG=""
+            AMD=$(printf '%s' "$MANIFEST" | jq -r 'first(.manifests[]? | select(.platform.architecture == "amd64") | .digest) // empty' 2>/dev/null || true)
+            if [ -n "$AMD" ]; then
+              CFG=$(curl -fsSL -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.oci.image.manifest.v1+json" "$REG/manifests/$AMD" | jq -r '.config.digest // empty' || true)
+            else
+              CFG=$(printf '%s' "$MANIFEST" | jq -r '.config.digest // empty' 2>/dev/null || true)
+            fi
+            if [ -n "$CFG" ]; then
+              LABELS=$(curl -fsSL -H "Authorization: Bearer $TOKEN" "$REG/blobs/$CFG" | jq -c '.config.Labels // {}' || true)
+              REV=$(printf '%s' "$LABELS" | jq -r '."org.opencontainers.image.revision" // empty')
+              REC=$(printf '%s' "$LABELS" | jq -r '."io.wxrchn.build-recipe" // empty')
+              echo "Existing ghcr.io/wxrchn/${{ matrix.image }}:latest stamp: revision=$REV recipe=$REC"
+              echo "Current source: ${{ steps.src.outputs.full }} recipe=$BUILD_RECIPE"
+              if [ "$REV" = "${{ steps.src.outputs.full }}" ] && [ "$REC" = "$BUILD_RECIPE" ]; then
+                skip=true
+              fi
+            fi
+          fi
+          echo "skip=$skip" >> "$GITHUB_OUTPUT"
+          if [ "$skip" = "true" ]; then echo "No new commits since this image was last built - skipping build."; fi
 
       - name: Resolve image version
+        if: steps.check.outputs.skip != 'true'
         run: |
           if [ -f scripts/release_version.sh ]; then
             echo "IMAGE_VERSION=$(bash scripts/release_version.sh development-version)" >> "$GITHUB_ENV"
@@ -51,6 +94,7 @@ jobs:
           fi
 
       - name: Compose image tags
+        if: steps.check.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -64,7 +108,7 @@ jobs:
           echo "Tags:"; echo "$TAGS"
 
       - name: Make s6-overlay arch-aware (rustdesk-server)
-        if: matrix.repo == 'rustdesk-server'
+        if: matrix.repo == 'rustdesk-server' && steps.check.outputs.skip != 'true'
         run: |
           python3 - <<'PYEOF'
           import pathlib
@@ -97,20 +141,24 @@ jobs:
           PYEOF
 
       - name: Pre-build step
-        if: ${{ matrix.pre != '' }}
+        if: ${{ matrix.pre != '' && steps.check.outputs.skip != 'true' }}
         run: ${{ matrix.pre }}
 
       - uses: docker/setup-qemu-action@v3
+        if: steps.check.outputs.skip != 'true'
 
       - uses: docker/setup-buildx-action@v3
+        if: steps.check.outputs.skip != 'true'
 
       - uses: docker/login-action@v3
+        if: steps.check.outputs.skip != 'true'
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: docker/build-push-action@v6
+        if: steps.check.outputs.skip != 'true'
         with:
           context: ${{ matrix.context || '.' }}
           file: ./${{ matrix.file }}
@@ -120,6 +168,9 @@ jobs:
             VERSION=${{ env.IMAGE_VERSION }}
             COMMIT=${{ steps.src.outputs.sha }}
           tags: ${{ env.TAGS }}
+          labels: |
+            org.opencontainers.image.revision=${{ steps.src.outputs.full }}
+            io.wxrchn.build-recipe=${{ env.BUILD_RECIPE }}
 
   # nginx-proxy-manager is not built from source (its image needs a frontend
   # pre-build); mirror the official Docker Hub image to GHCR instead.
@@ -138,8 +189,33 @@ jobs:
       - name: Mirror jc21/nginx-proxy-manager to GHCR
         run: |
           set -e
-          docker buildx imagetools create -t ghcr.io/wxrchn/nginx-proxy-manager:latest jc21/nginx-proxy-manager:latest
+          digest_of() {
+            local raw
+            raw=$(docker buildx imagetools inspect "$1" --raw 2>/dev/null) || { echo ""; return; }
+            if [ -z "$raw" ]; then echo ""; return; fi
+            if printf '%s' "$raw" | jq -e '.manifests' >/dev/null 2>&1; then
+              printf '%s' "$raw" | jq -r '[.manifests[] | select(.platform.architecture != "unknown") | .digest] | unique | join(",")'
+            else
+              printf 'sha256:%s' "$(printf '%s' "$raw" | sha256sum | cut -d' ' -f1)"
+            fi
+          }
           VER=$(curl -fsSL "https://hub.docker.com/v2/repositories/jc21/nginx-proxy-manager/tags?page_size=100&ordering=last_updated" | jq -r '[.results[].name | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))] | first // empty')
+          UP_L=$(digest_of jc21/nginx-proxy-manager:latest)
+          OUR_L=$(digest_of ghcr.io/wxrchn/nginx-proxy-manager:latest)
+          changed=true
+          if [ -n "$UP_L" ] && [ "$UP_L" = "$OUR_L" ]; then
+            changed=false
+            if [ -n "$VER" ]; then
+              UP_V=$(digest_of "jc21/nginx-proxy-manager:$VER")
+              OUR_V=$(digest_of "ghcr.io/wxrchn/nginx-proxy-manager:$VER")
+              if [ -z "$UP_V" ] || [ "$UP_V" != "$OUR_V" ]; then changed=true; fi
+            fi
+          fi
+          if [ "$changed" = "false" ]; then
+            echo "Upstream image unchanged - skipping mirror."
+            exit 0
+          fi
+          docker buildx imagetools create -t ghcr.io/wxrchn/nginx-proxy-manager:latest jc21/nginx-proxy-manager:latest
           if [ -n "$VER" ]; then
             docker buildx imagetools create -t "ghcr.io/wxrchn/nginx-proxy-manager:$VER" "jc21/nginx-proxy-manager:$VER"
             echo "Mirrored latest and $VER"
@@ -165,6 +241,15 @@ jobs:
       - name: Mirror hslr/sun-panel to GHCR
         run: |
           set -e
+          plat_digests() {
+            docker buildx imagetools inspect "$1" --raw 2>/dev/null | jq -r '[.manifests[]? | select(.platform.architecture != "unknown") | .digest] | unique | join(",")' || echo ""
+          }
+          tag_unchanged() {
+            local up our
+            up=$(plat_digests "hslr/sun-panel:$1")
+            our=$(plat_digests "ghcr.io/wxrchn/sun-panel:$1")
+            [ -n "$up" ] && [ "$up" = "$our" ]
+          }
           # GHCR rejects the attestation manifests bundled in the upstream
           # OCI index (403 on the unknown-architecture entries), so copy
           # only the real platform manifests into a fresh index.
@@ -175,8 +260,15 @@ jobs:
             for d in $digests; do args="$args docker.io/hslr/sun-panel@$d"; done
             docker buildx imagetools create -t "$dst" $args
           }
-          copy_tag latest
           VER=$(curl -fsSL "https://hub.docker.com/v2/repositories/hslr/sun-panel/tags?page_size=100" | jq -r '[.results[].name | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))] | sort_by(split(".") | map(tonumber)) | last // empty')
+          skip=true
+          if ! tag_unchanged latest; then skip=false; fi
+          if [ -n "$VER" ] && ! tag_unchanged "$VER"; then skip=false; fi
+          if [ "$skip" = "true" ]; then
+            echo "Upstream image unchanged - skipping mirror."
+            exit 0
+          fi
+          copy_tag latest
           if [ -n "$VER" ]; then
             copy_tag "$VER"
             echo "Mirrored latest and $VER"
