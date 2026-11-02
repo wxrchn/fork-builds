@@ -40,8 +40,11 @@ jobs:
           - { repo: filebrowser, branch: main, file: _docker/Dockerfile, image: filebrowser }
           - { repo: frp, branch: dev, file: dockerfiles/Dockerfile-for-frpc, image: frpc }
           - { repo: frp, branch: dev, file: dockerfiles/Dockerfile-for-frps, image: frps }
-          - { repo: memos, branch: main, file: scripts/Dockerfile, image: memos }
-          - { repo: rustdesk-server, branch: forapi, file: docker/Dockerfile, context: docker, image: rustdesk-server-s6 }
+          # memos: its Dockerfile expects the frontend to be built first (the
+          # binary embeds server/frontend/dist; a clean checkout only has a
+          # placeholder page there - found 2026-11-02). `pre` runs the web
+          # package's own release build before docker build.
+          - { repo: memos, branch: main, file: scripts/Dockerfile, image: memos, variant: fe-prebuild-1, pre: "corepack enable && cd web && pnpm install --frozen-lockfile && pnpm release" }
           - { repo: sshwifty, branch: master, file: Dockerfile, image: sshwifty }
           - { repo: watchtower, branch: main, file: dockerfiles/Dockerfile.self-contained, image: watchtower }
           - { repo: wud, branch: main, file: Dockerfile, image: wud }
@@ -112,39 +115,6 @@ jobs:
           fi
           { echo "TAGS<<EOF"; echo "$TAGS"; echo "EOF"; } >> "$GITHUB_ENV"
           echo "Tags:"; echo "$TAGS"
-
-      - name: Make s6-overlay arch-aware (rustdesk-server)
-        if: matrix.repo == 'rustdesk-server' && steps.check.outputs.skip != 'true'
-        run: |
-          python3 - <<'PYEOF'
-          import pathlib
-          p = pathlib.Path('docker/Dockerfile')
-          t = p.read_text()
-          stage = (
-              'FROM alpine:3 AS s6dl\n'
-              'ARG TARGETARCH\n'
-              'ARG S6_OVERLAY_VERSION=3.2.0.0\n'
-              'RUN case "$TARGETARCH" in amd64) A=x86_64 ;; arm64) A=aarch64 ;; arm) A=armhf ;; *) A=x86_64 ;; esac && \\\n'
-              '    wget -q "https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-noarch.tar.xz" -O /tmp/s6-overlay-noarch.tar.xz && \\\n'
-              '    wget -q "https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-${A}.tar.xz" -O /tmp/s6-overlay-arch.tar.xz\n'
-              '\n'
-          )
-          lines = []
-          for ln in t.splitlines():
-              if ln.strip() == 'ARG S6_ARCH=x86_64':
-                  continue
-              if ln.startswith('ADD ') and 's6-overlay-noarch.tar.xz' in ln:
-                  ln = 'COPY --from=s6dl /tmp/s6-overlay-noarch.tar.xz /tmp/s6-overlay-noarch.tar.xz'
-              elif ln.startswith('ADD ') and '${S6_ARCH}' in ln:
-                  ln = 'COPY --from=s6dl /tmp/s6-overlay-arch.tar.xz /tmp/s6-overlay-arch.tar.xz'
-              elif '${S6_ARCH}' in ln:
-                  ln = ln.replace('s6-overlay-${S6_ARCH}.tar.xz', 's6-overlay-arch.tar.xz')
-              lines.append(ln)
-          out = stage + '\n'.join(lines) + '\n'
-          assert 's6dl' in out and 'S6_ARCH=x86_64' not in out and '${S6_ARCH}' not in out, 'patch failed'
-          p.write_text(out)
-          print('patched docker/Dockerfile for per-arch s6-overlay')
-          PYEOF
 
       - name: Set up Node.js for pre-build
         if: ${{ matrix.pre != '' && steps.check.outputs.skip != 'true' }}
@@ -275,6 +245,61 @@ jobs:
             docker buildx imagetools create -t "$dst" $args
           }
           VER=$(curl -fsSL "https://hub.docker.com/v2/repositories/hslr/sun-panel/tags?page_size=100" | jq -r '[.results[].name | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))] | sort_by(split(".") | map(tonumber)) | last // empty')
+          skip=true
+          if ! tag_unchanged latest; then skip=false; fi
+          if [ -n "$VER" ] && ! tag_unchanged "$VER"; then skip=false; fi
+          if [ "$skip" = "true" ]; then
+            echo "Upstream image unchanged - skipping mirror."
+            exit 0
+          fi
+          copy_tag latest
+          if [ -n "$VER" ]; then
+            copy_tag "$VER"
+            echo "Mirrored latest and $VER"
+          else
+            echo "Mirrored latest only (no version tag resolved)"
+          fi
+
+  # rustdesk-server-s6 is mirrored, not built from source (wxr's call,
+  # 2026-11-02): the fork's Dockerfile expects the hbbs/hbbr release binaries
+  # to be dropped into the build context by hand, so a clean-checkout build
+  # silently produced an image without them (2026-11-02 audit). Mirror
+  # lejianwen's official GHCR package instead, like sun-panel.
+  mirror-rustdesk:
+    runs-on: ubuntu-latest
+    name: rustdesk-server-s6 (mirror)
+    steps:
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Mirror lejianwen/rustdesk-server-s6 to GHCR
+        run: |
+          set -e
+          plat_digests() {
+            docker buildx imagetools inspect "$1" --raw 2>/dev/null | jq -r '[.manifests[]? | select(.platform.architecture != "unknown") | .digest] | unique | join(",")' || echo ""
+          }
+          tag_unchanged() {
+            local up our
+            up=$(plat_digests "ghcr.io/lejianwen/rustdesk-server-s6:$1")
+            our=$(plat_digests "ghcr.io/wxrchn/rustdesk-server-s6:$1")
+            [ -n "$up" ] && [ "$up" = "$our" ]
+          }
+          # Copy only the real platform manifests into a fresh index, the
+          # same approach as the sun-panel mirror.
+          copy_tag() {
+            local src="ghcr.io/lejianwen/rustdesk-server-s6:$1" dst="ghcr.io/wxrchn/rustdesk-server-s6:$1"
+            local digests args=""
+            digests=$(docker buildx imagetools inspect "$src" --raw | jq -r '[.manifests[] | select(.platform.architecture != "unknown") | .digest] | unique | .[]')
+            for d in $digests; do args="$args ghcr.io/lejianwen/rustdesk-server-s6@$d"; done
+            docker buildx imagetools create -t "$dst" $args
+          }
+          TOK=$(curl -fsSL "https://ghcr.io/token?service=ghcr.io&scope=repository:lejianwen/rustdesk-server-s6:pull" | jq -r '.token // empty')
+          VER=$(curl -fsSL -H "Authorization: Bearer $TOK" "https://ghcr.io/v2/lejianwen/rustdesk-server-s6/tags/list" | jq -r '[.tags[] | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))] | sort_by(ltrimstr("v") | split(".") | map(tonumber)) | last // empty')
           skip=true
           if ! tag_unchanged latest; then skip=false; fi
           if [ -n "$VER" ] && ! tag_unchanged "$VER"; then skip=false; fi
