@@ -245,20 +245,28 @@ jobs:
             docker buildx imagetools create -t "$dst" $args
           }
           VER=$(curl -fsSL "https://hub.docker.com/v2/repositories/hslr/sun-panel/tags?page_size=100" | jq -r '[.results[].name | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))] | sort_by(split(".") | map(tonumber)) | last // empty')
-          skip=true
-          if ! tag_unchanged latest; then skip=false; fi
-          if [ -n "$VER" ] && ! tag_unchanged "$VER"; then skip=false; fi
-          if [ "$skip" = "true" ]; then
+          # The beta line (wxr, 2026-11-03): also mirror the floating beta tag
+          # and the versioned beta tag it currently points at (same digest),
+          # e.g. beta = 2.0.2-beta261101.
+          TAGS_JSON=$(curl -fsSL "https://hub.docker.com/v2/repositories/hslr/sun-panel/tags?page_size=100")
+          BETA_DIGEST=$(printf '%s' "$TAGS_JSON" | jq -r '[.results[] | select(.name == "beta") | .digest] | first // empty')
+          BETA_VER=""
+          if [ -n "$BETA_DIGEST" ]; then
+            BETA_VER=$(printf '%s' "$TAGS_JSON" | jq -r --arg d "$BETA_DIGEST" '[.results[] | select(.digest == $d and (.name | test("^[0-9]+\\.[0-9]+\\.[0-9]+-beta[0-9]+$"))) | .name] | first // empty')
+          fi
+          CANDIDATES="latest $VER"
+          if [ -n "$BETA_DIGEST" ]; then CANDIDATES="$CANDIDATES beta $BETA_VER"; fi
+          changed=""
+          for t in $CANDIDATES; do
+            [ -n "$t" ] || continue
+            if ! tag_unchanged "$t"; then changed="$changed $t"; fi
+          done
+          if [ -z "$changed" ]; then
             echo "Upstream image unchanged - skipping mirror."
             exit 0
           fi
-          copy_tag latest
-          if [ -n "$VER" ]; then
-            copy_tag "$VER"
-            echo "Mirrored latest and $VER"
-          else
-            echo "Mirrored latest only (no version tag resolved)"
-          fi
+          for t in $changed; do copy_tag "$t"; done
+          echo "Mirrored:$changed"
 
   # rustdesk-server-s6 is mirrored, not built from source (wxr's call,
   # 2026-11-02): the fork's Dockerfile expects the hbbs/hbbr release binaries
