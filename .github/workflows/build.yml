@@ -244,18 +244,21 @@ jobs:
             for d in $digests; do args="$args docker.io/hslr/sun-panel@$d"; done
             docker buildx imagetools create -t "$dst" $args
           }
-          VER=$(curl -fsSL "https://hub.docker.com/v2/repositories/hslr/sun-panel/tags?page_size=100" | jq -r '[.results[].name | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))] | sort_by(split(".") | map(tonumber)) | last // empty')
-          # The beta line (wxr, 2026-11-03): also mirror the floating beta tag
+          # Beta only (wxr, 2026-11-03): mirror just the floating beta tag
           # and the versioned beta tag it currently points at (same digest),
-          # e.g. beta = 2.0.2-beta261101.
+          # e.g. beta = 2.0.2-beta261101. The stable line (latest / 1.8.1) is
+          # no longer mirrored - wxr wants only the newest beta versions.
           TAGS_JSON=$(curl -fsSL "https://hub.docker.com/v2/repositories/hslr/sun-panel/tags?page_size=100")
           BETA_DIGEST=$(printf '%s' "$TAGS_JSON" | jq -r '[.results[] | select(.name == "beta") | .digest] | first // empty')
           BETA_VER=""
           if [ -n "$BETA_DIGEST" ]; then
             BETA_VER=$(printf '%s' "$TAGS_JSON" | jq -r --arg d "$BETA_DIGEST" '[.results[] | select(.digest == $d and (.name | test("^[0-9]+\\.[0-9]+\\.[0-9]+-beta[0-9]+$"))) | .name] | first // empty')
           fi
-          CANDIDATES="latest $VER"
-          if [ -n "$BETA_DIGEST" ]; then CANDIDATES="$CANDIDATES beta $BETA_VER"; fi
+          if [ -z "$BETA_DIGEST" ]; then
+            echo "No beta tag found upstream - nothing to mirror."
+            exit 0
+          fi
+          CANDIDATES="beta $BETA_VER"
           changed=""
           for t in $CANDIDATES; do
             [ -n "$t" ] || continue
