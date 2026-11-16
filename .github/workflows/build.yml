@@ -1,15 +1,15 @@
 name: Build fork images
 
 # Builds container images from wxrchn's forks (default branches) and pushes
-# them to GHCR under ghcr.io/wxrchn/*. Runs weekly on Mondays 02:00 UTC
-# (10:00 Asia/Shanghai), after the weekly fork sync, or manually.
+# them to GHCR under ghcr.io wxrchn/*. Runs weekly on Mondays 01:12 UTC
+# (09:12 Asia/Shanghai), at the same time as the weekly fork sync, or manually.
 # Skip rule (wxr, 2026-11-02): an image whose source has not changed since
 # the last build/mirror is skipped - no new commits, no rebuild.
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 2 * * 1"
+    - cron: "12 1 * * 1"
 
 permissions:
   contents: read
@@ -45,7 +45,6 @@ jobs:
           # placeholder page there - found 2026-11-02). `pre` runs the web
           # package's own release build before docker build.
           - { repo: memos, branch: main, file: scripts/Dockerfile, image: memos, variant: fe-prebuild-1, pre: "corepack enable && cd web && pnpm install --frozen-lockfile && pnpm release" }
-          - { repo: sshwifty, branch: master, file: Dockerfile, image: sshwifty }
           - { repo: watchtower, branch: main, file: dockerfiles/Dockerfile.self-contained, image: watchtower }
           - { repo: wud, branch: main, file: Dockerfile, image: wud }
     name: ${{ matrix.image }}
