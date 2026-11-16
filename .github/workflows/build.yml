@@ -1,7 +1,7 @@
 name: Build fork images
 
 # Builds container images from wxrchn's forks (default branches) and pushes
-# them to GHCR under ghcr.io wxrchn/*. Runs weekly on Mondays 01:12 UTC
+# them to GHCR under ghcr.io/wxrchn/*. Runs weekly on Mondays 01:12 UTC
 # (09:12 Asia/Shanghai), at the same time as the weekly fork sync, or manually.
 # Skip rule (wxr, 2026-11-02): an image whose source has not changed since
 # the last build/mirror is skipped - no new commits, no rebuild.
