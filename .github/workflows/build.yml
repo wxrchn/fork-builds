@@ -334,3 +334,68 @@ jobs:
           else
             echo "Mirrored latest only (no version tag resolved)"
           fi
+
+  # Euro-Office DocumentServer is mirrored, not built from source (wxr's
+  # call, 2026-11-26): building it from the fork would mean compiling the
+  # whole ONLYOFFICE-derived stack (core/web-apps/sdkjs/server submodules),
+  # so mirror the official GHCR package instead, like rustdesk-server-s6.
+  # Only this one package is kept for the DocumentServer fork.
+  mirror-documentserver:
+    runs-on: ubuntu-latest
+    name: documentserver (mirror)
+    steps:
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Mirror euro-office/documentserver to GHCR
+        run: |
+          set -e
+          plat_digests() {
+            docker buildx imagetools inspect "$1" --raw 2>/dev/null | jq -r '[.manifests[]? | select(.platform.architecture != "unknown") | .digest] | unique | join(",")' || echo ""
+          }
+          tag_unchanged() {
+            local up our
+            up=$(plat_digests "ghcr.io/euro-office/documentserver:$1")
+            our=$(plat_digests "ghcr.io/wxrchn/documentserver:$1")
+            [ -n "$up" ] && [ "$up" = "$our" ]
+          }
+          # Copy only the real platform manifests into a fresh index, the
+          # same approach as the rustdesk-server-s6 mirror.
+          copy_tag() {
+            local src="ghcr.io/euro-office/documentserver:$1" dst="ghcr.io/wxrchn/documentserver:$1"
+            local digests args=""
+            digests=$(docker buildx imagetools inspect "$src" --raw | jq -r '[.manifests[] | select(.platform.architecture != "unknown") | .digest] | unique | .[]')
+            for d in $digests; do args="$args ghcr.io/euro-office/documentserver@$d"; done
+            docker buildx imagetools create -t "$dst" $args
+          }
+          TOK=$(curl -fsSL "https://ghcr.io/token?service=ghcr.io&scope=repository:euro-office/documentserver:pull" | jq -r '.token // empty')
+          # The upstream package carries 1000+ tags (mostly CI artifacts), so
+          # page through the full list and keep plain vX.Y.Z release tags only
+          # (no -rc/-beta/-hotfix or per-arch suffixes).
+          url="https://ghcr.io/v2/euro-office/documentserver/tags/list?n=1000"
+          : > /tmp/eo_tags.json
+          while [ -n "$url" ]; do
+            curl -fsSL -D /tmp/eo_h.txt -H "Authorization: Bearer $TOK" "$url" >> /tmp/eo_tags.json
+            next=$(sed -n 's/^[Ll]ink: <\([^>]*\)>; rel="next".*/\1/p' /tmp/eo_h.txt | head -1)
+            if [ -n "$next" ]; then url="https://ghcr.io$next"; else url=""; fi
+          done
+          VER=$(jq -rs '[.[].tags[]? | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))] | sort_by(ltrimstr("v") | split(".") | map(tonumber)) | last // empty' /tmp/eo_tags.json)
+          skip=true
+          if ! tag_unchanged latest; then skip=false; fi
+          if [ -n "$VER" ] && ! tag_unchanged "$VER"; then skip=false; fi
+          if [ "$skip" = "true" ]; then
+            echo "Upstream image unchanged - skipping mirror."
+            exit 0
+          fi
+          copy_tag latest
+          if [ -n "$VER" ]; then
+            copy_tag "$VER"
+            echo "Mirrored latest and $VER"
+          else
+            echo "Mirrored latest only (no version tag resolved)"
+          fi
